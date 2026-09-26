@@ -1,11 +1,13 @@
 # Auction Engine
 
-A standalone Go service for **impression-priced second-price and GSP auctions**.
-Single-slot requests use second price; two- and three-slot requests use
-unweighted GSP with an all-or-nothing batch. Each request carries campaigns and bids;
-the service ranks eligible bids, charges the winner the greater of the floor or
-the next eligible bid, and atomically reserves that charge against a paced daily
-budget. Money is integer **micro-USD per impression** (`1,000,000` micros = `$1`).
+A standalone Go service for **single-slot second-price and multi-slot GSP
+auctions** with paced daily budgets. Single-slot requests charge the winner
+the greater of the floor or the next eligible bid. Two- and three-slot
+requests price each slot against the next eligible bid (last slot pays the
+floor); either all slots fill and are charged atomically, or none are. Direct
+requests supply campaign bids; the recommender bridge uses configured bids.
+Every clearing price is reserved against its campaign's daily budget. Money
+is integer **micro-USD per impression** (`1,000,000` micros = `$1`).
 The AlgoChat backend has an opt-in three-slot handoff, preserving its existing
 three-card contract. The recommender's classifier and Thompson sampling remain
 unchanged. This repo is independently runnable with synthetic campaign data.
@@ -13,20 +15,26 @@ unchanged. This repo is independently runnable with synthetic campaign data.
 ## Architecture
 
 ```text
-POST /v1/auctions  OR  recommender JSON -> POST /v1/auction-recommendations
-       |
-       v
-bearer auth + strict JSON + candidate validation
-       |
-       v
-memory mutex OR bounded commit queue -> PostgreSQL atomic batch
-       |
-       v
-UTC pacing -> rank -> second price / floor -> reserve + replay result
-       |
-       v
-JSON response + low-cardinality Prometheus metrics
+direct bids -> /v1/auctions    recommender JSON -> /v1/auction-recommendations
+                     \          /
+                auth + validation
+                     |
+          +----------+-----------+
+          |                      |
+     in-memory mutex       bounded commit queue
+          |                      |
+          |              PostgreSQL atomic batch
+          +----------+-----------+
+                     |
+      UTC pacing -> rank -> second price (1 slot) / GSP (2-3 slots)
+                     |
+           reserve budget + replay auction ID
+                     |
+              JSON + Prometheus metrics
 ```
+
+Pacing, ranking, pricing, reservation and replay run *inside* the chosen
+mutex or database transaction, not after it commits.
 
 In memory mode, a mutex covers checking allowance, ranking, pricing and
 charging. PostgreSQL mode drains up to 32 already-queued requests into one
@@ -39,9 +47,8 @@ Canonical lock ordering makes overlapping batches from multiple instances safe.
 Client errors are isolated within the commit batch, not charged or silently
 converted to fills. Both pricing implementations
 use `min(budget, burst + budget * elapsed_UTC_seconds/86400)` as the paced
-allowance. If the
-selected bidder cannot afford its clearing price, it is removed and all slot
-prices are recomputed. Equal bids break by campaign ID.
+allowance. If a selected bidder cannot afford its clearing price, it is
+removed and all slot prices are recomputed. Equal bids break by campaign ID.
 A lone eligible bidder pays the floor. A no-fill reserves nothing. At UTC
 midnight the spend ledger starts a new day. The memory replay cache resets;
 PostgreSQL stores replay entries by UTC day. A clock regression to a previous
@@ -87,11 +94,10 @@ requested slots must fill; otherwise **no campaign is charged**. With bids
 Slots are unweighted; there is no CTR or quality-score adjustment.
 
 Campaigns, daily budgets, pacing bursts and optional bridge bids are in
-`config/campaigns.json` (not
-reloaded at runtime). If you retry the *identical* request with the same
-`auction_id` during its replay window, the result is returned without another
-charge. Price `0` is possible when a floor of `0` meets a lone bidder; use a
-positive floor if free impressions are not desired.
+`config/campaigns.json` (not reloaded at runtime). If you retry the *identical*
+request with the same `auction_id` during its replay window, the result is
+returned without another charge. Price `0` is possible when a floor of `0`
+meets a lone bidder; use a positive floor if free impressions are not desired.
 
 ### Shared PostgreSQL ledger
 
@@ -166,7 +172,8 @@ go run ./cmd/auction-server -config config/benchmark.json
 go run ./cmd/loadtest -requests 100000 -warmup 2000 -concurrency 32
 ```
 
-Three in-memory local runs on **2026-09-26**, Linux/aarch64, **8 vCPUs**, Go **1.27.1**,
+Historical in-memory, single-slot local runs on **2026-09-26**, Linux/aarch64,
+**8 vCPUs**, Go **1.27.1**,
 client and server on the **same host via loopback**:
 
 | Run | Measured requests | Concurrent clients | Throughput¹ | p50 | p95 | p99 | Max | Errors / no-fills |
@@ -175,9 +182,12 @@ client and server on the **same host via loopback**:
 | 2 | 100,000 | 32 | 78,862 req/s | 0.234 ms | 1.205 ms | **1.837 ms** | 13.387 ms | 0 / 0 |
 | 3 (with auth/bridge code) | 100,000 | 32 | 76,362 req/s | 0.237 ms | 1.261 ms | **1.985 ms** | 7.133 ms | 0 / 0 |
 
-¹ Throughput divides 102,000 requests (including 2,000 warmups) by the full
-run time (1.304, 1.293 and 1.336 seconds respectively); latency percentiles include only the 100,000 measured
-requests, from start of the HTTP call through reading the response. Requests
+¹ This earlier harness divided 102,000 requests (including 2,000 warmups) by
+the full run time (1.304, 1.293 and 1.336 seconds respectively); latency
+percentiles include only the 100,000 measured requests, from start of the
+HTTP call through reading the response. Unlike the durable reports below,
+these historical runs have no checked-in raw JSON and their throughput
+method is not directly comparable to the current load generator. Requests
 carry unique auction IDs and cause real budget reservations. The client and
 server share this machine; these numbers **do not** include network hops,
 other processes, persistence or a multi-region deployment. The design target
@@ -185,7 +195,7 @@ is p99 < 10 ms under this stated local workload; the measurement is not a
 universal latency guarantee. Rerun the command on your hardware and report
 hardware, concurrency, fill rate and percentile together.
 
-### Durable-mode SLO results
+### Durable-mode GSP SLO results
 
 The current PostgreSQL path **meets p99 < 10 ms at eight clients** on this
 same host with three-slot GSP, synchronous disk-backed commits, a valid bearer

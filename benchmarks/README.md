@@ -12,16 +12,53 @@ HTTP, and `config/benchmark.json`. `fsync`, `synchronous_commit`, and
 Every request has a unique ID, and all clients contend on the same three
 campaigns. Requests reserve real ledger spend, not cached replay responses.
 
-Single server:
+From the repository root, start a **disposable** PostgreSQL 17 instance and
+one auction server (terminal 1). The commands use demo credentials and must
+not be exposed outside loopback:
 
 ```sh
+docker run --rm -d --name auction-benchmark-postgres \
+  -e POSTGRES_PASSWORD=benchmark_only -e POSTGRES_DB=auction_bench \
+  -p 127.0.0.1:5434:5432 postgres:17-alpine
+# Wait until: docker exec auction-benchmark-postgres pg_isready -U postgres -d auction_bench
+export AUCTION_DATABASE_URL='postgres://postgres:benchmark_only@127.0.0.1:5434/auction_bench?sslmode=disable'
+export AUCTION_TOKEN='benchmark-local-token'
+go run ./cmd/auction-server -config config/benchmark.json -listen 127.0.0.1:8789
+```
+
+In terminal 2, export the same `AUCTION_TOKEN` and run the single-server
+measurement. The output goes to `/tmp` so the committed reference report
+is preserved:
+
+```sh
+export AUCTION_TOKEN='benchmark-local-token'
 go run ./cmd/loadtest -url http://127.0.0.1:8789/v1/auctions \
   -requests 50000 -warmup 2000 -concurrency 8 -slots 3 \
   -max-p99 10ms -label postgres-gsp-single \
-  -output benchmarks/postgres-gsp-single.json
+  -output /tmp/auction-postgres-gsp-single.json
 ```
 
-For the two-server run, start a second server on port 8790 with the same
-`AUCTION_DATABASE_URL`, `AUCTION_TOKEN`, and benchmark config; use both URLs
-separated by a comma, keeping **eight clients total**, not eight per server.
-Set `AUCTION_TOKEN` in the load-test environment when auth is enabled.
+For the two-server run, start a second server (terminal 3) on port 8790 with
+the **same** `AUCTION_DATABASE_URL`, `AUCTION_TOKEN`, and benchmark config:
+
+```sh
+export AUCTION_DATABASE_URL='postgres://postgres:benchmark_only@127.0.0.1:5434/auction_bench?sslmode=disable'
+export AUCTION_TOKEN='benchmark-local-token'
+go run ./cmd/auction-server -config config/benchmark.json -listen 127.0.0.1:8790
+```
+
+Then in terminal 2 use both URLs, keeping **eight clients total**, not eight
+per server:
+
+```sh
+go run ./cmd/loadtest \
+  -url http://127.0.0.1:8789/v1/auctions,http://127.0.0.1:8790/v1/auctions \
+  -requests 50000 -warmup 2000 -concurrency 8 -slots 3 \
+  -max-p99 10ms -label postgres-gsp-two-servers \
+  -output /tmp/auction-postgres-gsp-two-servers.json
+```
+
+Stop only this disposable container when finished:
+`docker stop auction-benchmark-postgres`. Latency will vary by host, storage,
+Go version and database contention; passing p99 on one host is not a universal
+service guarantee.
