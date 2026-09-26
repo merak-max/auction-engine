@@ -1,0 +1,7 @@
+{
+  "campaigns": [
+    {"id": "atlas", "daily_budget_micros": 1000000000000, "pacing_burst_micros": 900000000000, "bid_micros": 1800},
+    {"id": "boreal", "daily_budget_micros": 1000000000000, "pacing_burst_micros": 900000000000, "bid_micros": 1500},
+    {"id": "cedar", "daily_budget_micros": 1000000000000, "pacing_burst_micros": 900000000000, "bid_micros": 1100}
+  ]
+}
