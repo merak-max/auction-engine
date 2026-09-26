@@ -1,4 +1,4 @@
-// Package auction implements a single-slot, impression-priced second-price auction.
+// Package auction implements impression-priced second-price and unweighted GSP auctions.
 package auction
 
 import (
@@ -39,14 +39,22 @@ type Request struct {
 	AuctionID   string      `json:"auction_id"`
 	FloorMicros int64       `json:"floor_micros"`
 	Candidates  []Candidate `json:"candidates"`
+	Slots       int         `json:"slots,omitempty"` // zero means one; multi-slot batches are all-or-nothing
+}
+
+type Winner struct {
+	WinnerID            string `json:"winner_id"`
+	WinningBidMicros    int64  `json:"winning_bid_micros"`
+	ClearingPriceMicros int64  `json:"clearing_price_micros"`
 }
 
 type Result struct {
-	AuctionID           string `json:"auction_id"`
-	WinnerID            string `json:"winner_id,omitempty"`
-	WinningBidMicros    int64  `json:"winning_bid_micros,omitempty"`
-	ClearingPriceMicros int64  `json:"clearing_price_micros,omitempty"`
-	NoFillReason        string `json:"no_fill_reason,omitempty"`
+	AuctionID           string   `json:"auction_id"`
+	WinnerID            string   `json:"winner_id,omitempty"`
+	WinningBidMicros    int64    `json:"winning_bid_micros,omitempty"`
+	ClearingPriceMicros int64    `json:"clearing_price_micros,omitempty"`
+	NoFillReason        string   `json:"no_fill_reason,omitempty"`
+	Winners             []Winner `json:"winners,omitempty"` // populated only for multi-slot requests
 }
 
 type account struct {
@@ -120,7 +128,7 @@ func (e *Engine) Run(req Request) (Result, error) {
 		if !sameRequest(previous.request, req) {
 			return Result{}, fmt.Errorf("%w: auction_id already used for a different request", ErrInvalidRequest)
 		}
-		return previous.result, nil
+		return cloneResult(previous.result), nil
 	}
 
 	// Seconds since UTC midnight; the burst supplies initial headroom. The
@@ -152,25 +160,49 @@ func (e *Engine) Run(req Request) (Result, error) {
 	})
 
 	result := Result{AuctionID: req.AuctionID, NoFillReason: "no_eligible_budget_or_bid"}
-	for i, winner := range eligible {
-		price := req.FloorMicros
-		if i+1 < len(eligible) {
-			price = max(price, eligible[i+1].BidMicros)
+	winners := make([]Winner, 0, req.slotCount())
+	for len(eligible) >= req.slotCount() {
+		winners = winners[:0]
+		removed := false
+		for i := 0; i < req.slotCount(); i++ {
+			winner := eligible[i]
+			price := req.FloorMicros
+			if i+1 < len(eligible) {
+				price = max(price, eligible[i+1].BidMicros)
+			}
+			if price > winner.headroom {
+				eligible = append(eligible[:i], eligible[i+1:]...)
+				removed = true
+				break
+			}
+			winners = append(winners, Winner{winner.CampaignID, winner.BidMicros, price})
 		}
-		// A bidder that cannot pay the second price is removed; the next
-		// bidder competes against the remaining, affordable bids.
-		if price > winner.headroom {
-			continue
+		if !removed {
+			break
 		}
-		e.accounts[winner.CampaignID].spent += price
-		result = Result{AuctionID: req.AuctionID, WinnerID: winner.CampaignID, WinningBidMicros: winner.BidMicros, ClearingPriceMicros: price}
-		break
+		winners = winners[:0] // every price must be recomputed after an exclusion
+	}
+	if len(winners) == req.slotCount() {
+		for _, winner := range winners {
+			e.accounts[winner.WinnerID].spent += winner.ClearingPriceMicros
+		}
+		first := winners[0]
+		result = Result{AuctionID: req.AuctionID, WinnerID: first.WinnerID, WinningBidMicros: first.WinningBidMicros, ClearingPriceMicros: first.ClearingPriceMicros}
+		if req.slotCount() > 1 {
+			result.Winners = winners
+		}
 	}
 	e.remember(req, result)
-	return result, nil
+	return cloneResult(result), nil
 }
 
+func (r Request) slotCount() int  { return max(1, r.Slots) }
+func cloneResult(r Result) Result { r.Winners = append([]Winner(nil), r.Winners...); return r }
+
 func validateRequest(req Request) error {
+	if req.Slots < 0 || req.Slots > 3 {
+		return fmt.Errorf("%w: slots must be 1 to 3 (or omitted)", ErrInvalidRequest)
+	}
 	if req.AuctionID == "" || len(req.AuctionID) > 128 {
 		return fmt.Errorf("%w: auction_id must be 1 to 128 bytes", ErrInvalidRequest)
 	}
@@ -191,7 +223,7 @@ func validateRequest(req Request) error {
 }
 
 func sameRequest(a, b Request) bool {
-	if a.AuctionID != b.AuctionID || a.FloorMicros != b.FloorMicros || len(a.Candidates) != len(b.Candidates) {
+	if a.AuctionID != b.AuctionID || a.FloorMicros != b.FloorMicros || a.slotCount() != b.slotCount() || len(a.Candidates) != len(b.Candidates) {
 		return false
 	}
 	for i := range a.Candidates {

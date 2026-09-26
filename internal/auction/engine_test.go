@@ -1,6 +1,7 @@
 package auction
 
 import (
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -21,19 +22,19 @@ func fixedClock() time.Time { return time.Date(2026, 9, 26, 0, 0, 0, 0, time.UTC
 func TestSecondPriceFloorTieAndReplay(t *testing.T) {
 	e := setup(t, fixedClock,
 		Campaign{"a", 100, 100, 0}, Campaign{"b", 100, 100, 0}, Campaign{"c", 100, 100, 0})
-	req := Request{"one", 3, []Candidate{{"b", 10}, {"a", 10}, {"c", 6}}}
+	req := Request{"one", 3, []Candidate{{"b", 10}, {"a", 10}, {"c", 6}}, 0}
 	got, err := e.Run(req)
 	if err != nil || got.WinnerID != "a" || got.ClearingPriceMicros != 10 || e.SpentMicros("a") != 10 {
 		t.Fatalf("tie/second price: result=%+v err=%v", got, err)
 	}
 	replay, err := e.Run(req)
-	if err != nil || replay != got || e.SpentMicros("a") != 10 {
+	if err != nil || !reflect.DeepEqual(replay, got) || e.SpentMicros("a") != 10 {
 		t.Fatalf("replay charged twice: %+v, %v", replay, err)
 	}
-	if _, err := e.Run(Request{"one", 5, []Candidate{{"a", 10}}}); err == nil {
+	if _, err := e.Run(Request{"one", 5, []Candidate{{"a", 10}}, 0}); err == nil {
 		t.Fatal("conflicting replay accepted")
 	}
-	got, err = e.Run(Request{"two", 3, []Candidate{{"c", 6}}})
+	got, err = e.Run(Request{"two", 3, []Candidate{{"c", 6}}, 0})
 	if err != nil || got.WinnerID != "c" || got.ClearingPriceMicros != 3 {
 		t.Fatalf("single bidder should pay floor: %+v %v", got, err)
 	}
@@ -41,7 +42,7 @@ func TestSecondPriceFloorTieAndReplay(t *testing.T) {
 
 func TestUnaffordableWinnerReauctioned(t *testing.T) {
 	e := setup(t, fixedClock, Campaign{"a", 5, 5, 0}, Campaign{"b", 20, 20, 0}, Campaign{"c", 20, 20, 0})
-	got, err := e.Run(Request{"one", 1, []Candidate{{"a", 10}, {"b", 8}, {"c", 4}}})
+	got, err := e.Run(Request{"one", 1, []Candidate{{"a", 10}, {"b", 8}, {"c", 4}}, 0})
 	if err != nil || got.WinnerID != "b" || got.ClearingPriceMicros != 4 || e.SpentMicros("a") != 0 {
 		t.Fatalf("winner should be reauctioned: %+v %v", got, err)
 	}
@@ -56,22 +57,22 @@ func TestPacingAndUTCRollover(t *testing.T) {
 			t.Fatalf("expected win: %+v %v", got, err)
 		}
 	}
-	got, err := e.Run(Request{"c", 5, []Candidate{{"a", 6}}})
+	got, err := e.Run(Request{"c", 5, []Candidate{{"a", 6}}, 0})
 	if err != nil || got.WinnerID != "" || e.SpentMicros("a") != 10 {
 		t.Fatalf("pacing should pause delivery: %+v %v", got, err)
 	}
 	now = now.Add(12 * time.Hour)
-	got, err = e.Run(Request{"d", 5, []Candidate{{"a", 6}}})
+	got, err = e.Run(Request{"d", 5, []Candidate{{"a", 6}}, 0})
 	if err != nil || got.WinnerID != "a" {
 		t.Fatalf("pacing should resume: %+v %v", got, err)
 	}
 	now = now.Add(12 * time.Hour)
-	got, err = e.Run(Request{"e", 5, []Candidate{{"a", 6}}})
+	got, err = e.Run(Request{"e", 5, []Candidate{{"a", 6}}, 0})
 	if err != nil || got.WinnerID != "a" || e.SpentMicros("a") != 5 {
 		t.Fatalf("UTC day should reset ledger: %+v %v", got, err)
 	}
 	now = now.Add(-24 * time.Hour)
-	if _, err := e.Run(Request{"f", 5, []Candidate{{"a", 6}}}); err != ErrClockRegression {
+	if _, err := e.Run(Request{"f", 5, []Candidate{{"a", 6}}, 0}); err != ErrClockRegression {
 		t.Fatalf("clock regression accepted: %v", err)
 	}
 }
@@ -85,7 +86,7 @@ func TestConcurrentBudgetNeverOverspends(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			id := time.Unix(0, int64(i)).Format(time.RFC3339Nano)
-			got, err := e.Run(Request{id, 1, []Candidate{{"a", 10}, {"b", 5}}})
+			got, err := e.Run(Request{id, 1, []Candidate{{"a", 10}, {"b", 5}}, 0})
 			if err != nil {
 				t.Errorf("auction: %v", err)
 			} else if got.WinnerID != "" {
@@ -105,10 +106,10 @@ func TestInvalidInputs(t *testing.T) {
 	}
 	e := setup(t, fixedClock, Campaign{"a", 10, 10, 0})
 	for _, req := range []Request{
-		{"", 1, []Candidate{{"a", 1}}},
-		{"x", -1, []Candidate{{"a", 1}}},
-		{"x", 1, []Candidate{{"a", 1}, {"a", 2}}},
-		{"x", 1, []Candidate{{"missing", 1}}},
+		{"", 1, []Candidate{{"a", 1}}, 0},
+		{"x", -1, []Candidate{{"a", 1}}, 0},
+		{"x", 1, []Candidate{{"a", 1}, {"a", 2}}, 0},
+		{"x", 1, []Candidate{{"missing", 1}}, 0},
 	} {
 		if _, err := e.Run(req); err == nil {
 			t.Fatalf("invalid request accepted: %+v", req)

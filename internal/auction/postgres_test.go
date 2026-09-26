@@ -47,13 +47,16 @@ func TestPostgresConcurrentAccountsAndReplay(t *testing.T) {
 	if err := b.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
+	batchA, batchB := NewBatcher(a), NewBatcher(b)
+	defer batchA.Close()
+	defer batchB.Close()
 	defer func() {
 		_, _ = dbA.ExecContext(ctx, `DELETE FROM auction_replays WHERE auction_id LIKE $1`, id+"%")
 		_, _ = dbA.ExecContext(ctx, `DELETE FROM auction_budget_accounts WHERE campaign_id=$1`, id)
 	}()
 	request := Request{AuctionID: id + "-replay", FloorMicros: 5, Candidates: []Candidate{{CampaignID: id, BidMicros: 10}}}
 	var replayWG sync.WaitGroup
-	for _, store := range []*PostgresStore{a, b} {
+	for _, store := range []*Batcher{batchA, batchB} {
 		replayWG.Add(1)
 		go func() {
 			defer replayWG.Done()
@@ -73,9 +76,9 @@ func TestPostgresConcurrentAccountsAndReplay(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			store := a
+			store := batchA
 			if i%2 == 0 {
-				store = b
+				store = batchB
 			}
 			got, err := store.Run(ctx, Request{AuctionID: fmt.Sprintf("%s-%d", id, i), FloorMicros: 5, Candidates: request.Candidates})
 			if err != nil {
@@ -92,5 +95,18 @@ func TestPostgresConcurrentAccountsAndReplay(t *testing.T) {
 	}
 	if spent != 100 || wins.Load() != 19 {
 		t.Fatalf("shared ledger: spent=%d additional_wins=%d; want 100 and 19", spent, wins.Load())
+	}
+	// One invalid auction must not roll back neighboring requests in a commit batch.
+	reqs := []Request{
+		{AuctionID: id + "-valid1", FloorMicros: 0, Candidates: []Candidate{{id, 10}}},
+		{AuctionID: id + "-invalid", FloorMicros: 0, Candidates: []Candidate{{"not-a-campaign", 10}}},
+		{AuctionID: id + "-valid2", FloorMicros: 0, Candidates: []Candidate{{id, 10}}},
+	}
+	outcomes, err := a.runBatch(ctx, reqs)
+	if err != nil || len(outcomes) != 3 {
+		t.Fatalf("batch failed: %+v %v", outcomes, err)
+	}
+	if outcomes[0].Result.WinnerID != id || outcomes[1].Code != "AU001" || outcomes[2].Result.WinnerID != id {
+		t.Fatalf("batch isolation: %+v", outcomes)
 	}
 }

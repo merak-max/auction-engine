@@ -53,7 +53,9 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		opts.Run = store.Run
+		batcher := auction.NewBatcher(store)
+		defer batcher.Close()
+		opts.Run = batcher.Run
 		opts.Ready = store.Ping
 	} else {
 		engine, err := auction.New(cfg, nil)

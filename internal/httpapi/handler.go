@@ -120,6 +120,7 @@ func NewHandler(opts Options) http.Handler {
 		var wrapper struct {
 			AuctionID              string          `json:"auction_id"`
 			FloorMicros            int64           `json:"floor_micros"`
+			Slots                  int             `json:"slots,omitempty"`
 			RecommendationResponse json.RawMessage `json:"recommendation_response"`
 		}
 		if err := decode(w, r, &wrapper); err != nil {
@@ -135,7 +136,7 @@ func NewHandler(opts Options) http.Handler {
 			http.Error(w, "expected a filled recommendation_response with 1 to 128 recommendations", http.StatusBadRequest)
 			return
 		}
-		req := auction.Request{AuctionID: wrapper.AuctionID, FloorMicros: wrapper.FloorMicros}
+		req := auction.Request{AuctionID: wrapper.AuctionID, FloorMicros: wrapper.FloorMicros, Slots: wrapper.Slots}
 		byID := make(map[string]json.RawMessage, len(upstream.Recommendations))
 		for _, raw := range upstream.Recommendations {
 			var rec struct {
@@ -157,10 +158,15 @@ func NewHandler(opts Options) http.Handler {
 			return
 		}
 		recordResult(m, result)
+		selected := make([]json.RawMessage, 0, len(result.Winners))
+		for _, winner := range result.Winners {
+			selected = append(selected, byID[winner.WinnerID])
+		}
 		writeJSON(w, struct {
-			Auction        auction.Result  `json:"auction"`
-			Recommendation json.RawMessage `json:"recommendation"`
-		}{result, byID[result.WinnerID]})
+			Auction         auction.Result    `json:"auction"`
+			Recommendation  json.RawMessage   `json:"recommendation"`
+			Recommendations []json.RawMessage `json:"recommendations"`
+		}{result, byID[result.WinnerID], selected})
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")

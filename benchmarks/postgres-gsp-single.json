@@ -1,0 +1,19 @@
+{
+  "date_utc": "2026-09-26T16:48:51Z",
+  "label": "postgres-gsp-single",
+  "go_version": "go1.27.1",
+  "platform": "linux/arm64",
+  "logical_cpus": 8,
+  "requests": 50000,
+  "warmup": 2000,
+  "concurrency": 8,
+  "slots": 3,
+  "elapsed_seconds": 28.458900261,
+  "requests_per_second": 1756.919611841778,
+  "p50_ms": 4.502021,
+  "p95_ms": 5.081489,
+  "p99_ms": 5.509269,
+  "max_ms": 19.696244,
+  "failures": 0,
+  "no_fills": 0
+}

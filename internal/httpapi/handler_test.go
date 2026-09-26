@@ -85,3 +85,25 @@ func TestAuthMetricsAndRecommendationBridge(t *testing.T) {
 		t.Fatalf("metrics: %d %s", metrics.Code, metrics.Body.String())
 	}
 }
+
+func TestThreeSlotBridgeAtomicFill(t *testing.T) {
+	e, _ := auction.New(auction.Config{Campaigns: []auction.Campaign{
+		{ID: "a", DailyBudgetMicros: 100, PacingBurstMicros: 100},
+		{ID: "b", DailyBudgetMicros: 100, PacingBurstMicros: 100},
+		{ID: "c", DailyBudgetMicros: 100, PacingBurstMicros: 100},
+	}}, nil)
+	h := NewHandler(Options{Bids: map[string]int64{"a": 10, "b": 8, "c": 6}, Run: func(_ context.Context, r auction.Request) (auction.Result, error) { return e.Run(r) }})
+	req := httptest.NewRequest("POST", "/v1/auction-recommendations", strings.NewReader(`{"auction_id":"batch","slots":3,"floor_micros":2,"recommendation_response":{"recommendations":[{"ad":{"campaign_id":"c"}},{"ad":{"campaign_id":"a"}},{"ad":{"campaign_id":"b"}}]}}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	var result struct {
+		Auction         auction.Result    `json:"auction"`
+		Recommendations []json.RawMessage `json:"recommendations"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || w.Code != 200 || len(result.Recommendations) != 3 || len(result.Auction.Winners) != 3 {
+		t.Fatalf("bridge result: %s %v", w.Body, err)
+	}
+	if e.SpentMicros("a") != 8 || e.SpentMicros("b") != 6 || e.SpentMicros("c") != 2 {
+		t.Fatal("incorrect GSP prices")
+	}
+}
