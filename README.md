@@ -8,7 +8,7 @@ floor); either all slots fill and are charged atomically, or none are. Direct
 requests supply campaign bids; the recommender bridge uses configured bids.
 Every clearing price is reserved against its campaign's daily budget. Money
 is integer **micro-USD per impression** (`1,000,000` micros = `$1`).
-The AlgoChat backend has an opt-in three-slot handoff, preserving its existing
+The OpenChat backend has an opt-in three-slot handoff, preserving its existing
 three-card contract. The recommender's classifier and Thompson sampling remain
 unchanged. This repo is independently runnable with synthetic campaign data.
 
@@ -128,7 +128,7 @@ rotate tokens, and do not expose the database DSN. Authenticated callers of
 `/v1/auctions` supply bids and must be trusted; the recommender bridge below
 uses server-configured bids instead.
 
-### Recommender handoff
+### OpenChat recommender handoff
 
 The existing recommender returns three Thompson-sampled recommendations, not
 auction bids. A consumer calls it first, then sends its *filled* JSON response
